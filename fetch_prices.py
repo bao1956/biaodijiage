@@ -147,6 +147,62 @@ def build_wide_table(pivot_df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def _fmt_price(v: float) -> str:
+    return f"{float(v):.4f}".rstrip("0").rstrip(".")
+
+
+def build_summaries(pivot_df: pd.DataFrame):
+    summaries = []
+    for code, name, _ in ASSETS:
+        if code not in pivot_df.columns:
+            continue
+        s = pivot_df[code].dropna()
+        if len(s) < 2:
+            summaries.append([f"{name} ({code})", "数据不足"])
+            continue
+
+        start_price = float(s.iloc[0])
+        end_price = float(s.iloc[-1])
+        change_pct = (end_price / start_price - 1) * 100
+
+        low = float(s.min())
+        high = float(s.max())
+        if high == low:
+            position = "持平"
+        else:
+            ratio = (end_price - low) / (high - low)
+            if ratio >= 0.66:
+                position = "上沿"
+            elif ratio <= 0.33:
+                position = "下沿"
+            else:
+                position = "中段"
+
+        last5 = s.tail(5).tolist()
+        if len(last5) >= 2:
+            pct_5 = (last5[-1] / last5[0] - 1) * 100
+            diffs = [last5[i + 1] - last5[i] for i in range(len(last5) - 1)]
+            mono_up = all(d >= 0 for d in diffs)
+            mono_down = all(d <= 0 for d in diffs)
+            if pct_5 > 1:
+                trend = "持续上涨" if mono_up else "震荡上行"
+            elif pct_5 < -1:
+                trend = "持续下跌" if mono_down else "震荡下行"
+            else:
+                trend = "震荡"
+        else:
+            trend = "数据不足"
+
+        sentence = (
+            f"近30交易日累计 {change_pct:+.2f}%"
+            f"（{_fmt_price(start_price)}→{_fmt_price(end_price)}），"
+            f"近5日{trend}，最新价处于30日区间 "
+            f"[{_fmt_price(low)}, {_fmt_price(high)}] 的{position}。"
+        )
+        summaries.append([f"{name} ({code})", sentence])
+    return summaries
+
+
 def push_to_google_sheet(pivot_df: pd.DataFrame) -> None:
     if not WEBHOOK_URL:
         print("[Sheet 写入跳过] 未设置 WEBHOOK_URL 环境变量")
@@ -166,7 +222,16 @@ def push_to_google_sheet(pivot_df: pd.DataFrame) -> None:
                 out_row.append(round(float(v), 4))
         rows.append(out_row)
 
-    payload = {"headers": [header_row_1, header_row_2], "rows": rows}
+    summaries = build_summaries(pivot_df)
+    print("\n===== 趋势总结 =====")
+    for label, sentence in summaries:
+        print(f"{label}: {sentence}")
+
+    payload = {
+        "headers": [header_row_1, header_row_2],
+        "rows": rows,
+        "summaries": summaries,
+    }
     resp = requests.post(
         WEBHOOK_URL,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),

@@ -2,8 +2,8 @@ name: Daily prices fetch
 
 on:
   schedule:
-    # 北京时间每个工作日 16:00 = UTC 08:00
-    - cron: '0 8 * * 1-5'
+    # 北京时间每个工作日 22:00 = UTC 14:00（晚于股票收盘 + 基金净值公布时间）
+    - cron: '0 14 * * 1-5'
   workflow_dispatch:  # 允许在 GitHub 网页手动触发
 
 jobs:

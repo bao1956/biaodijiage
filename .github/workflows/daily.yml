@@ -1,0 +1,25 @@
+name: Daily prices fetch
+
+on:
+  schedule:
+    # 北京时间每个工作日 16:00 = UTC 08:00
+    - cron: '0 8 * * 1-5'
+  workflow_dispatch:  # 允许在 GitHub 网页手动触发
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - run: pip install -r requirements.txt
+
+      - run: python fetch_prices.py
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}

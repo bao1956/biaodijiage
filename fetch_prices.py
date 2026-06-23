@@ -11,7 +11,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
 # ETF/股票 历史回取起点（保留主表自该日起的完整历史）
 PRICE_START_DATE = "2026-01-22"
-# 基金单位净值窗口（交易日数）
+# 基金累计净值窗口（交易日数）
 FUND_WINDOW_DAYS = 60
 
 # ===== tab 1：ETF =====
@@ -37,7 +37,7 @@ STOCK_ASSETS = [
     ("002714", "牧原股份"),
 ]
 
-# ===== tab 3：基金（候选/新增，单位净值）=====
+# ===== tab 3：基金（候选/新增，累计净值）=====
 # 来源：候选池「雪球推荐」6 只主动/QDII 基金（只取 A 类）
 NEW_FUND_ASSETS = [
     ("270023", "广发全球精选股票(QDII)人民币A"),
@@ -48,7 +48,7 @@ NEW_FUND_ASSETS = [
     ("003501", "宏利睿智稳健灵活配置混合"),
 ]
 
-# ===== tab 4：买入标的（已持有，单位净值，保持现状）=====
+# ===== tab 4：买入标的（已持有，累计净值）=====
 HELD_FUND_ASSETS = [
     ("110020", None), ("005313", None), ("160225", None), ("163406", None),
     ("161005", None), ("270002", None), ("015090", None), ("014987", None),
@@ -125,16 +125,16 @@ def get_stock_history(code: str) -> pd.DataFrame:
 
 def get_fund_nav_history(code: str, days: int = FUND_WINDOW_DAYS) -> pd.DataFrame:
     df = retry_call(
-        ak.fund_open_fund_info_em, symbol=code, indicator="单位净值走势",
+        ak.fund_open_fund_info_em, symbol=code, indicator="累计净值走势",
         retries=3, sleep_seconds=2,
     )
     if df.empty:
         raise ValueError("基金 NAV 返回空数据")
     df = df.copy()
     df["净值日期"] = pd.to_datetime(df["净值日期"], errors="coerce")
-    df["单位净值"] = pd.to_numeric(df["单位净值"], errors="coerce")
-    df = df.dropna(subset=["净值日期", "单位净值"]).sort_values("净值日期").tail(days)
-    return pd.DataFrame({"日期": df["净值日期"], "代码": code, "价格": df["单位净值"]})
+    df["累计净值"] = pd.to_numeric(df["累计净值"], errors="coerce")
+    df = df.dropna(subset=["净值日期", "累计净值"]).sort_values("净值日期").tail(days)
+    return pd.DataFrame({"日期": df["净值日期"], "代码": code, "价格": df["累计净值"]})
 
 
 def get_fund_name_map():
@@ -193,11 +193,12 @@ def build_summaries_for(pivot_df, codes, name_map, window_n, window_label):
     return summaries
 
 
-def push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n, window_label):
+def push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n, window_label,
+                        date_header="日期", note=None):
     if not WEBHOOK_URL:
         print(f"[Sheet 写入跳过] 未设置 WEBHOOK_URL (target={sheet_name})")
         return
-    header_row_1 = ["日期"] + [name_map.get(c, c) for c in codes]
+    header_row_1 = [date_header] + [name_map.get(c, c) for c in codes]
     header_row_2 = [""] + list(codes)
     rows = []
     for dt, row in pivot_df.iterrows():
@@ -207,6 +208,8 @@ def push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n, window_
             out_row.append("" if v is None or pd.isna(v) else round(float(v), 4))
         rows.append(out_row)
     summaries = build_summaries_for(pivot_df, codes, name_map, window_n, window_label)
+    if note:
+        summaries = [["口径说明", note]] + summaries
     print(f"\n===== {sheet_name} 趋势总结 =====")
     for label, sentence in summaries:
         print(f"{label}: {sentence}")
@@ -250,7 +253,7 @@ def run_price_tab(assets, sheet_name, fetch_fn):
 
 
 def run_fund_tab(assets, sheet_name):
-    print(f"\n===== 抓取 {sheet_name} ({len(assets)} 个，单位净值) =====")
+    print(f"\n===== 抓取 {sheet_name} ({len(assets)} 个，累计净值) =====")
     codes = [c for c, _ in assets]
     try:
         em_names = get_fund_name_map()
@@ -274,7 +277,12 @@ def run_fund_tab(assets, sheet_name):
         return
     pivot_df = build_pivot(pd.concat(data, ignore_index=True), codes)
     try:
-        push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n=FUND_WINDOW_DAYS, window_label="60日")
+        push_table_to_sheet(
+            pivot_df, codes, name_map, sheet_name,
+            window_n=FUND_WINDOW_DAYS, window_label="60日",
+            date_header="日期（累计净值）",
+            note="本表基金价格口径为累计净值（非单位净值）",
+        )
     except Exception as e:
         print(f"[{sheet_name} 写入失败] {e}")
 

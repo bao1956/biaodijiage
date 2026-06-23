@@ -2,7 +2,6 @@ import json
 import os
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import akshare as ak
 import pandas as pd
@@ -10,31 +9,52 @@ import requests
 
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
-ASSETS = [
-    ("515220", "煤炭 ETF", "ETF"),
-    ("159715", "稀土ETF", "ETF"),
-    ("512000", "券商ETF", "ETF"),
-    ("159865", "养殖ETF", "ETF"),
-    ("513050", "中概互联", "ETF"),
-    ("560710", "富国中证智选船舶产业ETF", "ETF"),
-    ("159307", "博时中证红利低波100ETF", "ETF"),
-    ("159758", "华夏中证红利质量ETF", "ETF"),
-    ("159209", "招商中证全指红利质量ETF", "ETF"),
-    ("563020", "易方达红利低波ETF", "ETF"),
-    ("600519", "贵州茅台", "A股"),
-    ("600036", "招商银行", "A股"),
-    ("600900", "长江电力", "A股"),
-    ("002714", "牧原股份", "A股"),
-    ("159566", "储能电池ETF易方达", "ETF"),
+# ETF/股票 历史回取起点（保留主表自该日起的完整历史）
+PRICE_START_DATE = "2026-01-22"
+# 基金单位净值窗口（交易日数）
+FUND_WINDOW_DAYS = 60
+
+# ===== tab 1：ETF =====
+ETF_ASSETS = [
+    ("515220", "煤炭 ETF"),
+    ("159715", "稀土ETF"),
+    ("512000", "券商ETF"),
+    ("159865", "养殖ETF"),
+    ("513050", "中概互联"),
+    ("560710", "富国中证智选船舶产业ETF"),
+    ("159307", "博时中证红利低波100ETF"),
+    ("159758", "华夏中证红利质量ETF"),
+    ("159209", "招商中证全指红利质量ETF"),
+    ("563020", "易方达红利低波ETF"),
+    ("159566", "储能电池ETF易方达"),
 ]
 
-CODES = [x[0] for x in ASSETS]
+# ===== tab 2：股票 =====
+STOCK_ASSETS = [
+    ("600519", "贵州茅台"),
+    ("600036", "招商银行"),
+    ("600900", "长江电力"),
+    ("002714", "牧原股份"),
+]
 
-FUND_CODES = [
-    "110020", "005313", "160225", "163406", "161005",
-    "270002", "015090", "014987", "110022", "161725",
-    "012414", "012348", "513050", "520920", "515220",
-    "159307", "515180", "159263", "021457", "023389",
+# ===== tab 3：基金（候选/新增，单位净值）=====
+# 来源：候选池「雪球推荐」6 只主动/QDII 基金（只取 A 类）
+NEW_FUND_ASSETS = [
+    ("270023", "广发全球精选股票(QDII)人民币A"),
+    ("100055", "富国全球科技互联网股票(QDII)A"),
+    ("008261", "招商研究优选股票A"),
+    ("519702", "交银施罗德趋势优先混合A"),
+    ("011371", "华商远见价值混合A"),
+    ("003501", "宏利睿智稳健灵活配置混合"),
+]
+
+# ===== tab 4：买入标的（已持有，单位净值，保持现状）=====
+HELD_FUND_ASSETS = [
+    ("110020", None), ("005313", None), ("160225", None), ("163406", None),
+    ("161005", None), ("270002", None), ("015090", None), ("014987", None),
+    ("110022", None), ("161725", None), ("012414", None), ("012348", None),
+    ("513050", None), ("520920", None), ("515220", None), ("159307", None),
+    ("515180", None), ("159263", None), ("021457", None), ("023389", None),
 ]
 
 
@@ -58,150 +78,111 @@ def retry_call(func, *args, retries=3, sleep_seconds=2, **kwargs):
     raise last_err
 
 
-def format_number(x):
-    if pd.isna(x):
-        return ""
-    return f"{float(x):.4f}".rstrip("0").rstrip(".")
-
-
 def format_date_for_output(dt_value):
     dt = pd.to_datetime(dt_value)
     return f"{dt.year}/{dt.month}/{dt.day}"
-
-
-def get_latest_30_etf(code: str) -> pd.DataFrame:
-    symbol = add_market_prefix(code)
-    df = retry_call(ak.fund_etf_hist_sina, symbol=symbol, retries=3, sleep_seconds=2)
-
-    if df.empty:
-        raise ValueError("ETF 返回空数据")
-
-    df = df.copy()
-    date_col = "date" if "date" in df.columns else "日期"
-    close_col = "close" if "close" in df.columns else "收盘"
-
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
-    df = df.dropna(subset=[date_col, close_col]).sort_values(date_col).tail(30)
-
-    return pd.DataFrame({
-        "日期": df[date_col],
-        "代码": code,
-        "价格": df[close_col],
-    })
-
-
-def get_latest_30_stock(code: str) -> pd.DataFrame:
-    symbol = add_market_prefix(code)
-    end_date = datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.now() - timedelta(days=120)).strftime("%Y%m%d")
-
-    df = retry_call(
-        ak.stock_zh_a_hist_tx,
-        symbol=symbol,
-        start_date=start_date,
-        end_date=end_date,
-        adjust="",
-        retries=3,
-        sleep_seconds=2,
-    )
-
-    if df.empty:
-        raise ValueError("A股 返回空数据")
-
-    df = df.copy()
-    date_col = "日期" if "日期" in df.columns else "date"
-    close_col = "收盘" if "收盘" in df.columns else "close"
-
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
-    df = df.dropna(subset=[date_col, close_col]).sort_values(date_col).tail(30)
-
-    return pd.DataFrame({
-        "日期": df[date_col],
-        "代码": code,
-        "价格": df[close_col],
-    })
-
-
-def build_pivot(long_df: pd.DataFrame) -> pd.DataFrame:
-    pivot_df = long_df.pivot_table(
-        index="日期",
-        columns="代码",
-        values="价格",
-        aggfunc="last",
-    )
-    for code in CODES:
-        if code not in pivot_df.columns:
-            pivot_df[code] = pd.NA
-    return pivot_df[CODES].sort_index()
-
-
-def build_wide_table(pivot_df: pd.DataFrame) -> str:
-    header_row_1 = ["日期"] + [name for code, name, _ in ASSETS]
-    header_row_2 = [""] + [code for code, name, _ in ASSETS]
-
-    lines = [
-        "\t".join(header_row_1),
-        "\t".join(header_row_2),
-    ]
-
-    for dt, row in pivot_df.iterrows():
-        line = [format_date_for_output(dt)]
-        for code in CODES:
-            line.append(format_number(row[code]))
-        lines.append("\t".join(line))
-
-    return "\n".join(lines)
 
 
 def _fmt_price(v: float) -> str:
     return f"{float(v):.4f}".rstrip("0").rstrip(".")
 
 
-def build_summaries_for(pivot_df: pd.DataFrame, codes, name_map, window_label="30交易日"):
+def get_etf_history(code: str) -> pd.DataFrame:
+    symbol = add_market_prefix(code)
+    df = retry_call(ak.fund_etf_hist_sina, symbol=symbol, retries=3, sleep_seconds=2)
+    if df.empty:
+        raise ValueError("ETF 返回空数据")
+    df = df.copy()
+    date_col = "date" if "date" in df.columns else "日期"
+    close_col = "close" if "close" in df.columns else "收盘"
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
+    df = df.dropna(subset=[date_col, close_col]).sort_values(date_col)
+    df = df[df[date_col] >= pd.to_datetime(PRICE_START_DATE)]
+    return pd.DataFrame({"日期": df[date_col], "代码": code, "价格": df[close_col]})
+
+
+def get_stock_history(code: str) -> pd.DataFrame:
+    symbol = add_market_prefix(code)
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = PRICE_START_DATE.replace("-", "")
+    df = retry_call(
+        ak.stock_zh_a_hist_tx,
+        symbol=symbol, start_date=start_date, end_date=end_date, adjust="",
+        retries=3, sleep_seconds=2,
+    )
+    if df.empty:
+        raise ValueError("A股 返回空数据")
+    df = df.copy()
+    date_col = "日期" if "日期" in df.columns else "date"
+    close_col = "收盘" if "收盘" in df.columns else "close"
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
+    df = df.dropna(subset=[date_col, close_col]).sort_values(date_col)
+    df = df[df[date_col] >= pd.to_datetime(PRICE_START_DATE)]
+    return pd.DataFrame({"日期": df[date_col], "代码": code, "价格": df[close_col]})
+
+
+def get_fund_nav_history(code: str, days: int = FUND_WINDOW_DAYS) -> pd.DataFrame:
+    df = retry_call(
+        ak.fund_open_fund_info_em, symbol=code, indicator="单位净值走势",
+        retries=3, sleep_seconds=2,
+    )
+    if df.empty:
+        raise ValueError("基金 NAV 返回空数据")
+    df = df.copy()
+    df["净值日期"] = pd.to_datetime(df["净值日期"], errors="coerce")
+    df["单位净值"] = pd.to_numeric(df["单位净值"], errors="coerce")
+    df = df.dropna(subset=["净值日期", "单位净值"]).sort_values("净值日期").tail(days)
+    return pd.DataFrame({"日期": df["净值日期"], "代码": code, "价格": df["单位净值"]})
+
+
+def get_fund_name_map():
+    df = retry_call(ak.fund_name_em, retries=3, sleep_seconds=2)
+    df = df.copy()
+    df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
+    return dict(zip(df["基金代码"], df["基金简称"]))
+
+
+def build_pivot(long_df: pd.DataFrame, codes) -> pd.DataFrame:
+    pivot_df = long_df.pivot_table(index="日期", columns="代码", values="价格", aggfunc="last")
+    for code in codes:
+        if code not in pivot_df.columns:
+            pivot_df[code] = pd.NA
+    return pivot_df[codes].sort_index()
+
+
+def build_summaries_for(pivot_df, codes, name_map, window_n, window_label):
     summaries = []
     for code in codes:
         if code not in pivot_df.columns:
             continue
         name = name_map.get(code, code)
-        s = pivot_df[code].dropna()
+        s = pivot_df[code].dropna().tail(window_n)
         if len(s) < 2:
             summaries.append([f"{name} ({code})", "数据不足"])
             continue
-
         start_price = float(s.iloc[0])
         end_price = float(s.iloc[-1])
         change_pct = (end_price / start_price - 1) * 100
-
         low = float(s.min())
         high = float(s.max())
         if high == low:
             position = "持平"
         else:
             ratio = (end_price - low) / (high - low)
-            if ratio >= 0.66:
-                position = "上沿"
-            elif ratio <= 0.33:
-                position = "下沿"
-            else:
-                position = "中段"
-
+            position = "上沿" if ratio >= 0.66 else ("下沿" if ratio <= 0.33 else "中段")
         last5 = s.tail(5).tolist()
-        if len(last5) >= 2:
-            pct_5 = (last5[-1] / last5[0] - 1) * 100
-            diffs = [last5[i + 1] - last5[i] for i in range(len(last5) - 1)]
-            mono_up = all(d >= 0 for d in diffs)
-            mono_down = all(d <= 0 for d in diffs)
-            if pct_5 > 1:
-                trend = "持续上涨" if mono_up else "震荡上行"
-            elif pct_5 < -1:
-                trend = "持续下跌" if mono_down else "震荡下行"
-            else:
-                trend = "震荡"
+        pct_5 = (last5[-1] / last5[0] - 1) * 100
+        diffs = [last5[i + 1] - last5[i] for i in range(len(last5) - 1)]
+        mono_up = all(d >= 0 for d in diffs)
+        mono_down = all(d <= 0 for d in diffs)
+        if pct_5 > 1:
+            trend = "持续上涨" if mono_up else "震荡上行"
+        elif pct_5 < -1:
+            trend = "持续下跌" if mono_down else "震荡下行"
         else:
-            trend = "数据不足"
-
+            trend = "震荡"
         sentence = (
             f"近{window_label}累计 {change_pct:+.2f}%"
             f"（{_fmt_price(start_price)}→{_fmt_price(end_price)}），"
@@ -212,43 +193,29 @@ def build_summaries_for(pivot_df: pd.DataFrame, codes, name_map, window_label="3
     return summaries
 
 
-def build_summaries(pivot_df: pd.DataFrame):
-    name_map = {code: name for code, name, _ in ASSETS}
-    return build_summaries_for(pivot_df, CODES, name_map, window_label="30交易日")
-
-
-def push_table_to_sheet(pivot_df, codes, name_map, sheet_name=None, window_label="30交易日"):
+def push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n, window_label):
     if not WEBHOOK_URL:
-        print(f"[Sheet 写入跳过] 未设置 WEBHOOK_URL 环境变量 (target={sheet_name or '主表'})")
+        print(f"[Sheet 写入跳过] 未设置 WEBHOOK_URL (target={sheet_name})")
         return
-
     header_row_1 = ["日期"] + [name_map.get(c, c) for c in codes]
     header_row_2 = [""] + list(codes)
-
     rows = []
     for dt, row in pivot_df.iterrows():
         out_row = [format_date_for_output(dt)]
         for code in codes:
             v = row[code] if code in pivot_df.columns else None
-            if v is None or pd.isna(v):
-                out_row.append("")
-            else:
-                out_row.append(round(float(v), 4))
+            out_row.append("" if v is None or pd.isna(v) else round(float(v), 4))
         rows.append(out_row)
-
-    summaries = build_summaries_for(pivot_df, codes, name_map, window_label=window_label)
-    print(f"\n===== {sheet_name or '主表'} 趋势总结 =====")
+    summaries = build_summaries_for(pivot_df, codes, name_map, window_n, window_label)
+    print(f"\n===== {sheet_name} 趋势总结 =====")
     for label, sentence in summaries:
         print(f"{label}: {sentence}")
-
     payload = {
         "headers": [header_row_1, header_row_2],
         "rows": rows,
         "summaries": summaries,
+        "sheetName": sheet_name,
     }
-    if sheet_name:
-        payload["sheetName"] = sheet_name
-
     resp = requests.post(
         WEBHOOK_URL,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -256,121 +223,67 @@ def push_table_to_sheet(pivot_df, codes, name_map, sheet_name=None, window_label
         timeout=60,
     )
     resp.raise_for_status()
-    print(f"[Sheet 写入响应 {sheet_name or '主表'}] {resp.text}")
+    print(f"[Sheet 写入响应 {sheet_name}] {resp.text}")
 
 
-def push_to_google_sheet(pivot_df: pd.DataFrame) -> None:
-    name_map = {code: name for code, name, _ in ASSETS}
-    push_table_to_sheet(pivot_df, CODES, name_map, sheet_name=None, window_label="30交易日")
-
-
-def get_fund_name_map():
-    df = retry_call(ak.fund_name_em, retries=3, sleep_seconds=2)
-    df = df.copy()
-    df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
-    return dict(zip(df["基金代码"], df["基金简称"]))
-
-
-def get_fund_nav_history(code: str, days: int = 60) -> pd.DataFrame:
-    df = retry_call(
-        ak.fund_open_fund_info_em,
-        symbol=code,
-        indicator="单位净值走势",
-        retries=3,
-        sleep_seconds=2,
-    )
-    if df.empty:
-        raise ValueError("基金 NAV 返回空数据")
-    df = df.copy()
-    df["净值日期"] = pd.to_datetime(df["净值日期"], errors="coerce")
-    df["单位净值"] = pd.to_numeric(df["单位净值"], errors="coerce")
-    df = df.dropna(subset=["净值日期", "单位净值"]).sort_values("净值日期").tail(days)
-    return pd.DataFrame({
-        "日期": df["净值日期"],
-        "代码": code,
-        "价格": df["单位净值"],
-    })
-
-
-def fetch_and_push_funds():
-    print("\n===== 开始抓取基金净值 =====")
-    try:
-        name_map = get_fund_name_map()
-    except Exception as e:
-        print(f"[基金名称表获取失败，将使用代码作名称] {e}")
-        name_map = {}
-
-    fund_data = []
-    for code in FUND_CODES:
+def run_price_tab(assets, sheet_name, fetch_fn):
+    print(f"\n===== 抓取 {sheet_name} ({len(assets)} 个) =====")
+    codes = [c for c, _ in assets]
+    name_map = {c: n for c, n in assets}
+    data = []
+    for code, name in assets:
         try:
-            df = get_fund_nav_history(code, days=60)
-            fund_data.append(df)
-            print(f"[成功] {code} {name_map.get(code, '(未知)')} 抓取到 {len(df)} 条净值")
-            time.sleep(0.8)
-        except Exception as e:
-            print(f"[失败] 基金 {code}: {e}")
-
-    if not fund_data:
-        print("所有基金都抓取失败")
-        return
-
-    long_df = pd.concat(fund_data, ignore_index=True)
-    pivot_df = long_df.pivot_table(
-        index="日期", columns="代码", values="价格", aggfunc="last"
-    )
-    for c in FUND_CODES:
-        if c not in pivot_df.columns:
-            pivot_df[c] = pd.NA
-    pivot_df = pivot_df[FUND_CODES].sort_index()
-
-    try:
-        push_table_to_sheet(pivot_df, FUND_CODES, name_map, sheet_name="买入标的", window_label="60日")
-    except Exception as e:
-        print(f"[基金 Sheet 写入失败] {e}")
-
-
-def main():
-    all_data = []
-
-    for code, name, asset_type in ASSETS:
-        try:
-            if asset_type == "ETF":
-                df = get_latest_30_etf(code)
-            else:
-                df = get_latest_30_stock(code)
-
-            all_data.append(df)
-            print(f"[成功] {code} {name} 抓取到 {len(df)} 条数据")
+            df = fetch_fn(code)
+            data.append(df)
+            print(f"[成功] {code} {name} {len(df)} 条")
             time.sleep(0.8)
         except Exception as e:
             print(f"[失败] {code} {name}: {e}")
-
-    if not all_data:
-        print("所有代码都抓取失败")
+    if not data:
+        print(f"{sheet_name} 全部抓取失败，跳过")
         return
-
-    long_df = pd.concat(all_data, ignore_index=True)
-    pivot_df = build_pivot(long_df)
-    table_text = build_wide_table(pivot_df)
-
-    print("\n===== 可直接复制到表格的软件内容 =====\n")
-    print(table_text)
-
-    desktop = Path.home() / "Desktop"
-    output_file = (desktop if desktop.exists() else Path(".")) / "latest_30_trading_days_wide.tsv"
-    with open(output_file, "w", encoding="utf-8-sig") as f:
-        f.write(table_text)
-    print(f"\n已保存到: {output_file}")
-
+    pivot_df = build_pivot(pd.concat(data, ignore_index=True), codes)
     try:
-        push_to_google_sheet(pivot_df)
+        push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n=30, window_label="30交易日")
     except Exception as e:
-        print(f"[Sheet 写入失败] {e}")
+        print(f"[{sheet_name} 写入失败] {e}")
 
+
+def run_fund_tab(assets, sheet_name):
+    print(f"\n===== 抓取 {sheet_name} ({len(assets)} 个，单位净值) =====")
+    codes = [c for c, _ in assets]
     try:
-        fetch_and_push_funds()
+        em_names = get_fund_name_map()
     except Exception as e:
-        print(f"[基金流程失败] {e}")
+        print(f"[基金名称表获取失败] {e}")
+        em_names = {}
+    name_map = {}
+    for c, n in assets:
+        name_map[c] = n or em_names.get(c, c)
+    data = []
+    for code in codes:
+        try:
+            df = get_fund_nav_history(code, days=FUND_WINDOW_DAYS)
+            data.append(df)
+            print(f"[成功] {code} {name_map.get(code)} {len(df)} 条")
+            time.sleep(0.8)
+        except Exception as e:
+            print(f"[失败] {code} {name_map.get(code)}: {e}")
+    if not data:
+        print(f"{sheet_name} 全部抓取失败，跳过")
+        return
+    pivot_df = build_pivot(pd.concat(data, ignore_index=True), codes)
+    try:
+        push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n=FUND_WINDOW_DAYS, window_label="60日")
+    except Exception as e:
+        print(f"[{sheet_name} 写入失败] {e}")
+
+
+def main():
+    run_price_tab(ETF_ASSETS, "ETF", get_etf_history)
+    run_price_tab(STOCK_ASSETS, "股票", get_stock_history)
+    run_fund_tab(NEW_FUND_ASSETS, "基金")
+    run_fund_tab(HELD_FUND_ASSETS, "买入标的")
 
 
 if __name__ == "__main__":

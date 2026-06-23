@@ -11,7 +11,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 
 # ETF/股票 历史回取起点（保留主表自该日起的完整历史）
 PRICE_START_DATE = "2026-01-22"
-# 基金累计净值窗口（交易日数）
+# 基金单位净值窗口（交易日数）
 FUND_WINDOW_DAYS = 60
 
 # ===== tab 1：ETF =====
@@ -37,7 +37,7 @@ STOCK_ASSETS = [
     ("002714", "牧原股份"),
 ]
 
-# ===== tab 3：基金（候选/新增，累计净值）=====
+# ===== tab 3：基金（候选/新增，单位净值）=====
 # 来源：候选池「雪球推荐」6 只主动/QDII 基金（只取 A 类）
 NEW_FUND_ASSETS = [
     ("270023", "广发全球精选股票(QDII)人民币A"),
@@ -50,7 +50,7 @@ NEW_FUND_ASSETS = [
 
 # ===== tab 4：买入标的（已持有）=====
 # 口径规则（全表通用，避免同一 ETF 在不同 sheet 价格不一致）：
-#   场内 ETF -> 二级市场收盘价；开放式/联接基金 -> 累计净值
+#   场内 ETF -> 二级市场收盘价；开放式/联接基金 -> 单位净值
 HELD_FUND_ASSETS = [
     ("110020", None), ("005313", None), ("160225", None), ("163406", None),
     ("161005", None), ("270002", None), ("015090", None), ("014987", None),
@@ -132,16 +132,16 @@ def get_stock_history(code: str) -> pd.DataFrame:
 
 def get_fund_nav_history(code: str, days: int = FUND_WINDOW_DAYS) -> pd.DataFrame:
     df = retry_call(
-        ak.fund_open_fund_info_em, symbol=code, indicator="累计净值走势",
+        ak.fund_open_fund_info_em, symbol=code, indicator="单位净值走势",
         retries=3, sleep_seconds=2,
     )
     if df.empty:
         raise ValueError("基金 NAV 返回空数据")
     df = df.copy()
     df["净值日期"] = pd.to_datetime(df["净值日期"], errors="coerce")
-    df["累计净值"] = pd.to_numeric(df["累计净值"], errors="coerce")
-    df = df.dropna(subset=["净值日期", "累计净值"]).sort_values("净值日期").tail(days)
-    return pd.DataFrame({"日期": df["净值日期"], "代码": code, "价格": df["累计净值"]})
+    df["单位净值"] = pd.to_numeric(df["单位净值"], errors="coerce")
+    df = df.dropna(subset=["净值日期", "单位净值"]).sort_values("净值日期").tail(days)
+    return pd.DataFrame({"日期": df["净值日期"], "代码": code, "价格": df["单位净值"]})
 
 
 def get_fund_name_map():
@@ -262,7 +262,7 @@ def run_price_tab(assets, sheet_name, fetch_fn):
 def run_fund_tab(assets, sheet_name, market_codes=None):
     market_codes = market_codes or set()
     mixed = bool(market_codes & {c for c, _ in assets})
-    kind = "累计净值 + 场内ETF二级市场价" if mixed else "累计净值"
+    kind = "单位净值 + 场内ETF二级市场价" if mixed else "单位净值"
     print(f"\n===== 抓取 {sheet_name} ({len(assets)} 个，{kind}) =====")
     codes = [c for c, _ in assets]
     try:
@@ -279,7 +279,7 @@ def run_fund_tab(assets, sheet_name, market_codes=None):
             if code in market_codes:
                 df = get_etf_history(code)  # 场内 ETF：二级市场收盘价
             else:
-                df = get_fund_nav_history(code, days=FUND_WINDOW_DAYS)  # 基金：累计净值
+                df = get_fund_nav_history(code, days=FUND_WINDOW_DAYS)  # 基金：单位净值
             data.append(df)
             print(f"[成功] {code} {name_map.get(code)} {len(df)} 条")
             time.sleep(0.8)
@@ -292,11 +292,11 @@ def run_fund_tab(assets, sheet_name, market_codes=None):
     used_etf = sorted(market_codes & set(codes))
     if mixed:
         date_header = "日期"
-        note = ("本表口径：开放式/联接基金=累计净值；场内ETF（"
+        note = ("本表口径：开放式/联接基金=单位净值；场内ETF（"
                 + "、".join(used_etf) + "）=二级市场收盘价")
     else:
-        date_header = "日期（累计净值）"
-        note = "本表基金价格口径为累计净值（非单位净值）"
+        date_header = "日期（单位净值）"
+        note = "本表基金价格口径为单位净值（非累计净值）"
     try:
         push_table_to_sheet(
             pivot_df, codes, name_map, sheet_name,

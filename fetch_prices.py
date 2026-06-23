@@ -48,7 +48,9 @@ NEW_FUND_ASSETS = [
     ("003501", "宏利睿智稳健灵活配置混合"),
 ]
 
-# ===== tab 4：买入标的（已持有，累计净值）=====
+# ===== tab 4：买入标的（已持有）=====
+# 口径规则（全表通用，避免同一 ETF 在不同 sheet 价格不一致）：
+#   场内 ETF -> 二级市场收盘价；开放式/联接基金 -> 累计净值
 HELD_FUND_ASSETS = [
     ("110020", None), ("005313", None), ("160225", None), ("163406", None),
     ("161005", None), ("270002", None), ("015090", None), ("014987", None),
@@ -56,6 +58,11 @@ HELD_FUND_ASSETS = [
     ("513050", None), ("520920", None), ("515220", None), ("159307", None),
     ("515180", None), ("159263", None), ("021457", None), ("023389", None),
 ]
+
+# 场内 ETF：始终用二级市场收盘价（与「ETF」sheet 同源同口径，保证跨 sheet 一致）
+ETF_MARKET_CODES = {
+    "513050", "520920", "515220", "159307", "515180", "159263",
+}
 
 
 def add_market_prefix(code: str) -> str:
@@ -252,8 +259,11 @@ def run_price_tab(assets, sheet_name, fetch_fn):
         print(f"[{sheet_name} 写入失败] {e}")
 
 
-def run_fund_tab(assets, sheet_name):
-    print(f"\n===== 抓取 {sheet_name} ({len(assets)} 个，累计净值) =====")
+def run_fund_tab(assets, sheet_name, market_codes=None):
+    market_codes = market_codes or set()
+    mixed = bool(market_codes & {c for c, _ in assets})
+    kind = "累计净值 + 场内ETF二级市场价" if mixed else "累计净值"
+    print(f"\n===== 抓取 {sheet_name} ({len(assets)} 个，{kind}) =====")
     codes = [c for c, _ in assets]
     try:
         em_names = get_fund_name_map()
@@ -266,7 +276,10 @@ def run_fund_tab(assets, sheet_name):
     data = []
     for code in codes:
         try:
-            df = get_fund_nav_history(code, days=FUND_WINDOW_DAYS)
+            if code in market_codes:
+                df = get_etf_history(code)  # 场内 ETF：二级市场收盘价
+            else:
+                df = get_fund_nav_history(code, days=FUND_WINDOW_DAYS)  # 基金：累计净值
             data.append(df)
             print(f"[成功] {code} {name_map.get(code)} {len(df)} 条")
             time.sleep(0.8)
@@ -276,12 +289,19 @@ def run_fund_tab(assets, sheet_name):
         print(f"{sheet_name} 全部抓取失败，跳过")
         return
     pivot_df = build_pivot(pd.concat(data, ignore_index=True), codes)
+    used_etf = sorted(market_codes & set(codes))
+    if mixed:
+        date_header = "日期"
+        note = ("本表口径：开放式/联接基金=累计净值；场内ETF（"
+                + "、".join(used_etf) + "）=二级市场收盘价")
+    else:
+        date_header = "日期（累计净值）"
+        note = "本表基金价格口径为累计净值（非单位净值）"
     try:
         push_table_to_sheet(
             pivot_df, codes, name_map, sheet_name,
             window_n=FUND_WINDOW_DAYS, window_label="60日",
-            date_header="日期（累计净值）",
-            note="本表基金价格口径为累计净值（非单位净值）",
+            date_header=date_header, note=note,
         )
     except Exception as e:
         print(f"[{sheet_name} 写入失败] {e}")
@@ -291,7 +311,7 @@ def main():
     run_price_tab(ETF_ASSETS, "ETF", get_etf_history)
     run_price_tab(STOCK_ASSETS, "股票", get_stock_history)
     run_fund_tab(NEW_FUND_ASSETS, "基金")
-    run_fund_tab(HELD_FUND_ASSETS, "买入标的")
+    run_fund_tab(HELD_FUND_ASSETS, "买入标的", market_codes=ETF_MARKET_CODES)
 
 
 if __name__ == "__main__":

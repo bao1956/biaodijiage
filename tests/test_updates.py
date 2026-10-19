@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -81,6 +82,29 @@ class HealthRecordTests(unittest.TestCase):
             save()
             with self.assertRaises(ValueError):
                 record_success(source, target)
+
+
+class MarketFreshnessTests(unittest.TestCase):
+    @patch.object(prices, "datetime")
+    @patch.object(prices, "_recent_market_prices")
+    def test_new_close_replaces_stale_history_without_duplicates(self, recent, clock):
+        clock.now.return_value = datetime(2026, 10, 19, 16, 30)
+        history = pd.DataFrame({"日期": pd.to_datetime(["2026-10-15", "2026-10-16"]), "代码": ["600519"] * 2, "价格": [1312.97, 1329.0]})
+        recent.return_value = pd.DataFrame({"日期": pd.to_datetime(["2026-10-16", "2026-10-19"]), "代码": ["600519"] * 2, "价格": [1329.0, 1324.97]})
+        result = prices.refresh_market_tail(history, "600519")
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result.iloc[-1]["价格"], 1324.97)
+        recent.assert_called_once_with("600519", "2026-10-19")
+
+    @patch.object(prices, "datetime")
+    @patch.object(prices, "_recent_market_prices")
+    def test_before_close_excludes_intraday_candle(self, recent, clock):
+        clock.now.return_value = datetime(2026, 10, 19, 14, 30)
+        history = pd.DataFrame({"日期": pd.to_datetime(["2026-10-16", "2026-10-19"]), "代码": ["600519"] * 2, "价格": [1329.0, 1320.0]})
+        recent.return_value = history.iloc[:1]
+        result = prices.refresh_market_tail(history, "600519")
+        self.assertEqual(result.iloc[-1]["日期"], pd.Timestamp("2026-10-16"))
+        recent.assert_called_once_with("600519", "2026-10-18")
 
 
 if __name__ == "__main__":

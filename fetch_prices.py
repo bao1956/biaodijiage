@@ -3,6 +3,8 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 import akshare as ak
 import pandas as pd
@@ -108,6 +110,38 @@ def _fmt_price(v: float) -> str:
     return f"{float(v):.4f}".rstrip("0").rstrip(".")
 
 
+@lru_cache(maxsize=128)
+def _recent_market_prices(code: str, end_date: str) -> pd.DataFrame:
+    """腾讯不复权日线；短窗口与动态缓存参数避免全历史接口返回旧缓存。"""
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    start = (end - timedelta(days=14)).strftime("%Y-%m-%d")
+    symbol = add_market_prefix(code)
+    response = requests.get(
+        "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get",
+        params={"param": f"{symbol},day,{start},{end_date},20,", "r": str(time.time_ns())},
+        timeout=30,
+    )
+    response.raise_for_status()
+    rows = response.json()["data"][symbol]["day"]
+    recent = pd.DataFrame([
+        {"日期": pd.to_datetime(row[0]), "代码": code, "价格": float(row[2])}
+        for row in rows if start <= row[0] <= end_date
+    ])
+    if recent.empty or not recent["价格"].gt(0).all():
+        raise ValueError(f"{code} 最新日线缺少有效收盘价")
+    return recent
+
+
+def refresh_market_tail(history: pd.DataFrame, code: str) -> pd.DataFrame:
+    # 日线接口盘中也可能包含当日行情；15 点前只取此前已经收盘的日期。
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    end = now.date() if now.hour >= 15 else (now - timedelta(days=1)).date()
+    recent = retry_call(_recent_market_prices, code, end.isoformat())
+    merged = pd.concat([history, recent], ignore_index=True)
+    merged = merged[merged["日期"] <= pd.Timestamp(end)]
+    return merged.drop_duplicates(subset=["日期"], keep="last").sort_values("日期").reset_index(drop=True)
+
+
 def get_etf_history(code: str) -> pd.DataFrame:
     symbol = add_market_prefix(code)
     df = retry_call(ak.fund_etf_hist_sina, symbol=symbol, retries=3, sleep_seconds=2)
@@ -120,7 +154,7 @@ def get_etf_history(code: str) -> pd.DataFrame:
     df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
     df = df.dropna(subset=[date_col, close_col]).sort_values(date_col)
     df = df[df[date_col] >= pd.to_datetime(PRICE_START_DATE)]
-    return pd.DataFrame({"日期": df[date_col], "代码": code, "价格": df[close_col]})
+    return refresh_market_tail(pd.DataFrame({"日期": df[date_col], "代码": code, "价格": df[close_col]}), code)
 
 
 def get_stock_history(code: str) -> pd.DataFrame:
@@ -141,7 +175,7 @@ def get_stock_history(code: str) -> pd.DataFrame:
     df[close_col] = pd.to_numeric(df[close_col], errors="coerce")
     df = df.dropna(subset=[date_col, close_col]).sort_values(date_col)
     df = df[df[date_col] >= pd.to_datetime(PRICE_START_DATE)]
-    return pd.DataFrame({"日期": df[date_col], "代码": code, "价格": df[close_col]})
+    return refresh_market_tail(pd.DataFrame({"日期": df[date_col], "代码": code, "价格": df[close_col]}), code)
 
 
 def get_fund_nav_history(code: str, days: int = FUND_WINDOW_DAYS) -> pd.DataFrame:

@@ -7,6 +7,13 @@ on:
     - cron: '0 14,15,16 * * 1-5'
   workflow_dispatch:  # 允许在 GitHub 网页手动触发
 
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-prices
+  cancel-in-progress: false
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
@@ -21,6 +28,42 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      - run: python -m unittest discover -s tests
+
       - run: python fetch_prices.py
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: update-status
+          path: run-status.json
+          retention-days: 7
+
+  record-success:
+    needs: fetch
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          name: update-status
+      # 每 30 天保存一次实际成功写入记录，保持仓库活跃，避免公开仓库
+      # 连续 60 天无活动后 schedule 被 GitHub 自动停用。记录不包含价格或密钥。
+      - run: python scripts/record_success.py
+      - name: Commit monthly update health record
+        run: |
+          git add .github/last-success.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: record successful scheduled price update'
+          git push origin HEAD:main

@@ -1,7 +1,8 @@
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import akshare as ak
 import pandas as pd
@@ -216,8 +217,7 @@ def build_summaries_for(pivot_df, codes, name_map, window_n, window_label):
 def push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n, window_label,
                         date_header="日期", note=None):
     if not WEBHOOK_URL:
-        print(f"[Sheet 写入跳过] 未设置 WEBHOOK_URL (target={sheet_name})")
-        return
+        raise RuntimeError(f"未设置 WEBHOOK_URL (target={sheet_name})")
     header_row_1 = [date_header] + [name_map.get(c, c) for c in codes]
     header_row_2 = [""] + list(codes)
     rows = []
@@ -246,7 +246,16 @@ def push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n, window_
         timeout=60,
     )
     resp.raise_for_status()
-    print(f"[Sheet 写入响应 {sheet_name}] {resp.text}")
+    result = resp.json()
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        raise RuntimeError(f"Sheet 未确认写入成功: {sheet_name}")
+    print(f"[Sheet 写入响应 {sheet_name}] {result}")
+    latest_dates = {
+        code: format_date_for_output(pivot_df[code].dropna().index[-1])
+        for code in codes if not pivot_df[code].dropna().empty
+    }
+    print(f"[最新数据日期 {sheet_name}] {latest_dates}")
+    return {"sheet": sheet_name, "assets": len(codes), "latest_dates": latest_dates}
 
 
 def run_price_tab(assets, sheet_name, fetch_fn):
@@ -254,22 +263,22 @@ def run_price_tab(assets, sheet_name, fetch_fn):
     codes = [c for c, _ in assets]
     name_map = {c: n for c, n in assets}
     data = []
+    failed = []
     for code, name in assets:
         try:
             df = fetch_fn(code)
+            if df.empty:
+                raise ValueError("清洗后没有有效价格数据")
             data.append(df)
             print(f"[成功] {code} {name} {len(df)} 条")
             time.sleep(0.8)
         except Exception as e:
             print(f"[失败] {code} {name}: {e}")
-    if not data:
-        print(f"{sheet_name} 全部抓取失败，跳过")
-        return
+            failed.append(code)
+    if failed or not data:
+        raise RuntimeError(f"{sheet_name} 抓取不完整，保留原表: {failed}")
     pivot_df = build_pivot(pd.concat(data, ignore_index=True), codes)
-    try:
-        push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n=30, window_label="30交易日")
-    except Exception as e:
-        print(f"[{sheet_name} 写入失败] {e}")
+    return push_table_to_sheet(pivot_df, codes, name_map, sheet_name, window_n=30, window_label="30交易日")
 
 
 def run_fund_tab(assets, sheet_name, market_codes=None):
@@ -287,20 +296,23 @@ def run_fund_tab(assets, sheet_name, market_codes=None):
     for c, n in assets:
         name_map[c] = n or em_names.get(c, c)
     data = []
+    failed = []
     for code in codes:
         try:
             if code in market_codes:
                 df = get_etf_history(code)  # 场内 ETF：二级市场收盘价
             else:
                 df = get_fund_nav_history(code, days=FUND_WINDOW_DAYS)  # 基金：单位净值
+            if df.empty:
+                raise ValueError("清洗后没有有效价格数据")
             data.append(df)
             print(f"[成功] {code} {name_map.get(code)} {len(df)} 条")
             time.sleep(0.8)
         except Exception as e:
             print(f"[失败] {code} {name_map.get(code)}: {e}")
-    if not data:
-        print(f"{sheet_name} 全部抓取失败，跳过")
-        return
+            failed.append(code)
+    if failed or not data:
+        raise RuntimeError(f"{sheet_name} 抓取不完整，保留原表: {failed}")
     pivot_df = build_pivot(pd.concat(data, ignore_index=True), codes)
     used_etf = sorted(market_codes & set(codes))
     if mixed:
@@ -310,21 +322,34 @@ def run_fund_tab(assets, sheet_name, market_codes=None):
     else:
         date_header = "日期（单位净值）"
         note = "本表基金价格口径为单位净值（非累计净值）"
-    try:
-        push_table_to_sheet(
-            pivot_df, codes, name_map, sheet_name,
-            window_n=FUND_WINDOW_DAYS, window_label="60日",
-            date_header=date_header, note=note,
-        )
-    except Exception as e:
-        print(f"[{sheet_name} 写入失败] {e}")
+    return push_table_to_sheet(
+        pivot_df, codes, name_map, sheet_name,
+        window_n=FUND_WINDOW_DAYS, window_label="60日",
+        date_header=date_header, note=note,
+    )
 
 
 def main():
-    run_price_tab(ETF_ASSETS, "ETF", get_etf_history)
-    run_price_tab(STOCK_ASSETS, "股票", get_stock_history)
-    run_fund_tab(NEW_FUND_ASSETS, "基金")
-    run_fund_tab(HELD_FUND_ASSETS, "买入标的", market_codes=ETF_MARKET_CODES)
+    # 失败要让 Actions 打红；继续尝试其他表，但不把缺列的半成品写入原表。
+    tasks = [
+        (run_price_tab, (ETF_ASSETS, "ETF", get_etf_history)),
+        (run_price_tab, (STOCK_ASSETS, "股票", get_stock_history)),
+        (run_fund_tab, (NEW_FUND_ASSETS, "基金")),
+        (run_fund_tab, (HELD_FUND_ASSETS, "买入标的", ETF_MARKET_CODES)),
+    ]
+    reports, failures = [], []
+    for func, args in tasks:
+        try:
+            reports.append(func(*args))
+        except Exception as e:
+            failures.append(args[1])
+            print(f"[更新失败 {args[1]}] {e}")
+    if failures:
+        raise RuntimeError(f"更新失败的工作表: {', '.join(failures)}")
+    Path("run-status.json").write_text(json.dumps({
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "sheets": reports,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
